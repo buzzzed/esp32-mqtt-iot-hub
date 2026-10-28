@@ -1,0 +1,317 @@
+<!doctype html>
+<!--
+  IoT Hub dashboard: a single static page served by the hub at "/".
+
+  No build step and no external libraries (it works on a LAN with no internet):
+  plain JavaScript calls the same JSON API documented at /docs, and charts are
+  drawn as inline SVG. It refreshes every 5 seconds.
+
+  Security note: device payloads come from the network, so every value is
+  HTML-escaped (esc()) before it goes into the page.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IoT Hub</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --text: #1d2330; --muted: #6b7280;
+    --border: #e3e6eb; --accent: #2563eb; --ok: #16a34a; --bad: #dc2626;
+    --warn: #9ca3af; --line1: #2563eb; --line2: #ea580c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1218; --card: #181c24; --text: #e6e8ec; --muted: #9aa3b2;
+      --border: #2a303b; --accent: #60a5fa; --ok: #4ade80; --bad: #f87171;
+      --warn: #6b7280; --line1: #60a5fa; --line2: #fb923c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 16px 24px;
+           border-bottom: 1px solid var(--border); background: var(--card); }
+  header h1 { font-size: 18px; margin: 0; flex: 1; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px; display: grid; gap: 24px; }
+  h2 { font-size: 15px; margin: 0 0 12px; color: var(--muted);
+       text-transform: uppercase; letter-spacing: .04em; }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  .card.device { cursor: pointer; }
+  .card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; color: #fff; white-space: nowrap; }
+  .pill.online { background: var(--ok); } .pill.offline { background: var(--bad); }
+  .pill.unknown { background: var(--warn); }
+  .reading { font-size: 22px; font-weight: 600; margin: 8px 0 2px; }
+  .reading small { font-size: 13px; font-weight: 400; color: var(--muted); }
+  button { font: inherit; border: 1px solid var(--border); background: var(--card); color: var(--text);
+           border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .charts { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  svg.chart { width: 100%; height: 160px; display: block; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  td code { font-size: 13px; }
+  form.rule { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+              margin-top: 14px; }
+  input, select { font: inherit; padding: 5px 8px; border-radius: 6px; width: 100%;
+                  border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+  label { font-size: 12px; color: var(--muted); display: grid; gap: 2px; }
+  #error { color: var(--bad); font-size: 13px; min-height: 1em; }
+  .scroll { overflow-x: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>IoT Hub</h1>
+  <span id="mqtt" class="pill unknown">MQTT …</span>
+</header>
+
+<main>
+  <section>
+    <h2>Devices</h2>
+    <div id="devices" class="grid"><p class="muted">Loading…</p></div>
+  </section>
+
+  <section>
+    <h2 id="history-title">History</h2>
+    <div id="charts" class="charts"><p class="muted">Select a sensor device above.</p></div>
+  </section>
+
+  <section class="card">
+    <h2>Rules</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Name</th><th>When</th><th>Then publish</th><th>Cooldown</th><th>Last fired</th><th></th></tr></thead>
+      <tbody id="rules"></tbody>
+    </table></div>
+    <form class="rule" id="rule-form">
+      <label>Name<input name="name" required placeholder="fan on when hot"></label>
+      <label>Topic<input name="topic" required placeholder="sensors/node1/env"></label>
+      <label>Field<input name="field" required placeholder="temp"></label>
+      <label>Operator<select name="operator">
+        <option>&gt;</option><option>&gt;=</option><option>&lt;</option>
+        <option>&lt;=</option><option>==</option><option>!=</option></select></label>
+      <label>Value<input name="value" type="number" step="any" required placeholder="28"></label>
+      <label>Action topic<input name="action_topic" required placeholder="actuators/node2/led"></label>
+      <label>Action payload<input name="action_payload" required placeholder="on"></label>
+      <label>Cooldown (s)<input name="cooldown_seconds" type="number" min="0" value="30"></label>
+      <label>&nbsp;<button class="primary" type="submit">Add rule</button></label>
+    </form>
+    <div id="error"></div>
+  </section>
+</main>
+
+<script>
+const REFRESH_MS = 5000;
+let selectedDevice = null;  // device whose history is charted
+
+// ---------- helpers ----------
+
+// Escape text before inserting it as HTML (payloads come from the network).
+function esc(value) {
+  return String(value).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    headers: { "content-type": "application/json" }, ...options });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = JSON.stringify((await res.json()).detail); } catch {}
+    throw new Error(`${res.status}: ${detail}`);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+function ago(iso) {
+  if (!iso) return "never";
+  const s = Math.round((Date.now() - new Date(iso)) / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  return new Date(iso).toLocaleString();
+}
+
+// Numeric fields of a payload object, e.g. {temp: 22.4, humidity: 41}.
+function numericFields(payload) {
+  if (!payload || typeof payload !== "object") return {};
+  return Object.fromEntries(Object.entries(payload).filter(([, v]) => typeof v === "number"));
+}
+
+function showError(err) {
+  document.getElementById("error").textContent = err ? String(err.message || err) : "";
+}
+
+// ---------- devices ----------
+
+async function renderDevices() {
+  const devices = await api("/devices");
+  // Fetch each device's latest reading in parallel; a 404 just means "none yet".
+  const latest = await Promise.all(devices.map(d =>
+    api(`/devices/${encodeURIComponent(d.id)}/latest`).catch(() => null)));
+
+  const el = document.getElementById("devices");
+  if (!devices.length) {
+    el.innerHTML = '<p class="muted">No devices yet. Power on a node.</p>';
+    return;
+  }
+  if (!selectedDevice) {
+    const firstSensor = devices.find((d, i) => latest[i]?.topic.startsWith("sensors/"));
+    selectedDevice = firstSensor?.id ?? null;
+  }
+
+  el.innerHTML = devices.map((d, i) => {
+    const r = latest[i];
+    let body = '<p class="muted">No readings yet</p>';
+    if (r && r.topic.startsWith("actuators/")) {
+      // Actuator: show reported state and on/off buttons.
+      body = `<div class="reading">${esc(r.payload)} <small>${esc(r.topic.split("/")[2])}</small></div>
+        <div class="row" style="justify-content:flex-start;margin-top:8px">
+          <button data-cmd="on" data-id="${esc(d.id)}">On</button>
+          <button data-cmd="off" data-id="${esc(d.id)}">Off</button>
+        </div>`;
+    } else if (r) {
+      const fields = Object.entries(numericFields(r.payload));
+      body = fields.length
+        ? fields.map(([k, v]) => `<div class="reading">${esc(v)} <small>${esc(k)}</small></div>`).join("")
+        : `<div class="muted">${esc(JSON.stringify(r.payload))}</div>`;
+    }
+    return `<div class="card device ${d.id === selectedDevice ? "selected" : ""}" data-select="${esc(d.id)}">
+      <div class="row"><strong>${esc(d.id)}</strong>
+        <span class="pill ${esc(d.status)}">${esc(d.status)}</span></div>
+      ${body}
+      <div class="muted">Last seen ${esc(ago(d.last_seen))}</div>
+    </div>`;
+  }).join("");
+}
+
+// One click handler for the whole grid ("event delegation"), so it survives
+// the grid being re-rendered every refresh.
+document.getElementById("devices").addEventListener("click", async e => {
+  const cmd = e.target.closest("[data-cmd]");
+  if (cmd) {
+    e.stopPropagation();
+    try {
+      await api(`/devices/${encodeURIComponent(cmd.dataset.id)}/command`,
+                { method: "POST", body: JSON.stringify({ action: cmd.dataset.cmd }) });
+      showError(null);
+      setTimeout(refresh, 500);  // give the device a moment to report its new state
+    } catch (err) { showError(err); }
+    return;
+  }
+  const card = e.target.closest("[data-select]");
+  if (card) { selectedDevice = card.dataset.select; refresh(); }
+});
+
+// ---------- history charts ----------
+
+// Draw one line chart as an SVG string. points = [{t: Date, v: number}], oldest first.
+function lineChart(label, points, color) {
+  const W = 400, H = 160, PAD = { l: 40, r: 10, t: 20, b: 20 };
+  const vs = points.map(p => p.v), ts = points.map(p => +p.t);
+  let lo = Math.min(...vs), hi = Math.max(...vs);
+  if (lo === hi) { lo -= 1; hi += 1; }               // flat line: give it some room
+  const t0 = Math.min(...ts), t1 = Math.max(...ts) || t0 + 1;
+  const x = t => PAD.l + (t - t0) / Math.max(t1 - t0, 1) * (W - PAD.l - PAD.r);
+  const y = v => PAD.t + (hi - v) / (hi - lo) * (H - PAD.t - PAD.b);
+  const path = points.map(p => `${x(+p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
+  const last = vs[vs.length - 1];
+
+  return `<div class="card">
+    <div class="row"><strong>${esc(label)}</strong><span class="muted">now ${esc(last)}</span></div>
+    <svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img"
+         aria-label="${esc(label)} over time">
+      <line x1="${PAD.l}" x2="${W - PAD.r}" y1="${y(hi)}" y2="${y(hi)}" stroke="var(--border)"/>
+      <line x1="${PAD.l}" x2="${W - PAD.r}" y1="${y(lo)}" y2="${y(lo)}" stroke="var(--border)"/>
+      <text x="4" y="${y(hi) + 4}" font-size="11" fill="var(--muted)">${esc(+hi.toFixed(1))}</text>
+      <text x="4" y="${y(lo) + 4}" font-size="11" fill="var(--muted)">${esc(+lo.toFixed(1))}</text>
+      <polyline points="${path}" fill="none" stroke="${color}" stroke-width="2"
+                vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
+    </svg>
+    <div class="row muted"><span>${esc(new Date(t0).toLocaleTimeString())}</span>
+      <span>${esc(new Date(t1).toLocaleTimeString())}</span></div>
+  </div>`;
+}
+
+async function renderHistory() {
+  const el = document.getElementById("charts");
+  const title = document.getElementById("history-title");
+  if (!selectedDevice) return;
+  title.textContent = `History: ${selectedDevice}`;
+
+  const rows = await api(`/devices/${encodeURIComponent(selectedDevice)}/history?limit=200`);
+  rows.reverse();  // API returns newest first; charts read left-to-right in time
+
+  // Group numeric fields into one series each: {temp: [...], humidity: [...]}.
+  const series = {};
+  for (const r of rows) {
+    for (const [k, v] of Object.entries(numericFields(r.payload))) {
+      (series[k] ??= []).push({ t: new Date(r.received_at), v });
+    }
+  }
+  const colors = ["var(--line1)", "var(--line2)"];
+  const names = Object.keys(series);
+  el.innerHTML = names.length
+    ? names.map((k, i) => lineChart(k, series[k], colors[i % colors.length])).join("")
+    : '<p class="muted">No numeric readings for this device.</p>';
+}
+
+// ---------- rules ----------
+
+async function renderRules() {
+  const rules = await api("/rules");
+  document.getElementById("rules").innerHTML = rules.length ? rules.map(r => `<tr>
+      <td>${esc(r.name)}${r.enabled ? "" : ' <span class="muted">(disabled)</span>'}</td>
+      <td><code>${esc(r.topic)}</code> · ${esc(r.field)} ${esc(r.operator)} ${esc(r.value)}</td>
+      <td><code>${esc(r.action_topic)}</code> ← ${esc(r.action_payload)}</td>
+      <td>${esc(r.cooldown_seconds)}s</td>
+      <td class="muted">${esc(ago(r.last_fired_at))}</td>
+      <td><button data-delete="${esc(r.id)}">Delete</button></td>
+    </tr>`).join("")
+    : '<tr><td colspan="6" class="muted">No rules yet. Add one below.</td></tr>';
+}
+
+document.getElementById("rules").addEventListener("click", async e => {
+  const btn = e.target.closest("[data-delete]");
+  if (!btn || !confirm("Delete this rule?")) return;
+  try { await api(`/rules/${btn.dataset.delete}`, { method: "DELETE" }); showError(null); renderRules(); }
+  catch (err) { showError(err); }
+});
+
+document.getElementById("rule-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const form = Object.fromEntries(new FormData(e.target));
+  const rule = { ...form, value: Number(form.value), cooldown_seconds: Number(form.cooldown_seconds || 0) };
+  try {
+    await api("/rules", { method: "POST", body: JSON.stringify(rule) });
+    e.target.reset();
+    showError(null);
+    renderRules();
+  } catch (err) { showError(err); }  // e.g. 422 validation error from the API
+});
+
+// ---------- refresh loop ----------
+
+async function refresh() {
+  try {
+    const health = await api("/health");
+    const pill = document.getElementById("mqtt");
+    pill.className = `pill ${health.mqtt_connected ? "online" : "offline"}`;
+    pill.textContent = health.mqtt_connected ? "MQTT connected" : "MQTT disconnected";
+    await renderDevices();
+    await Promise.all([renderHistory(), renderRules()]);
+  } catch (err) {
+    showError(err);
+  }
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>

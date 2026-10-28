@@ -1,0 +1,17 @@
+# Secrets: Wi-Fi password and broker address
+firmware/include/config.h
+
+# PlatformIO build output
+firmware/.pio/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Runtime data
+*.db
+*.db-wal
+*.db-shm

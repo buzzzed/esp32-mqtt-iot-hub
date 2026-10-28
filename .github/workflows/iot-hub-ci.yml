@@ -1,0 +1,46 @@
+# Runs on every push and pull request:
+#   hub-tests      - the Python hub's unit and API tests
+#   firmware-build - compiles both ESP32 node types with PlatformIO
+name: IoT Hub CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  hub-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hub
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # the version Raspberry Pi OS (Bookworm) ships
+          cache: pip
+          cache-dependency-path: hub/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -q
+
+  firmware-build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [sensor, actuator]
+    defaults:
+      run:
+        working-directory: firmware
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ hashFiles('firmware/platformio.ini') }}
+      - run: pip install platformio
+      # config.h is gitignored; compile against the example values.
+      - run: cp include/config.example.h include/config.h
+      - run: pio run -e ${{ matrix.node }}

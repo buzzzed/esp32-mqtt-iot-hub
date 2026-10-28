@@ -1,0 +1,27 @@
+# systemd unit: runs the hub API at boot and restarts it if it crashes.
+#
+# Install (adjust User and paths if your checkout lives elsewhere):
+#   sudo cp iot-hub.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now iot-hub
+#   journalctl -u iot-hub -f        # follow the logs
+
+[Unit]
+Description=IoT hub REST API and rules engine
+# Start after the network; add your broker's unit here too if it has one,
+# e.g. After=network-online.target mqtt-broker.service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/iot-hub/hub
+Environment=MQTT_HOST=127.0.0.1
+Environment=MQTT_PORT=1883
+Environment=DB_PATH=/home/pi/iot-hub/hub/hub.db
+ExecStart=/home/pi/iot-hub/hub/.venv/bin/uvicorn iot_hub.hub_api:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
